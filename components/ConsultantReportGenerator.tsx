@@ -203,10 +203,11 @@ export default function ConsultantReportGenerator() {
       toast.success('Report Generated', {
         description: 'Content extracted and analyzed successfully.',
       })
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Processing error:', err)
+      const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred'
       toast.error('Failed to process content', {
-        description: err.message || 'An unexpected error occurred',
+        description: errorMessage,
       })
     } finally {
       setIsLoading(false)

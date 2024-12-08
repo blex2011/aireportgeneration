@@ -6,7 +6,7 @@ import Underline from '@tiptap/extension-underline'
 import TextAlign from '@tiptap/extension-text-align'
 import { Button } from '@/components/ui/button'
 import { Bold, Italic, UnderlineIcon, AlignLeft, AlignCenter, AlignRight, List } from 'lucide-react'
-import { useEffect, useCallback } from 'react'
+import { useEffect } from 'react'
 
 interface TipTapEditorProps {
   initialContent: string

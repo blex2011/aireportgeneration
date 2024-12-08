@@ -74,19 +74,6 @@ export async function POST(request: Request) {
       mainContent = formatContent($, 'body')
     }
 
-    console.log('Formatted Content Preview:', mainContent.substring(0, 200))
-
-    // Log the full result object
-    const result = {
-      url,
-      title,
-      description,
-      mainContent: mainContent.slice(0, 5000), // Still limit length
-      timestamp: new Date().toISOString()
-    }
-    
-    console.log('Full Cheerio Result:', JSON.stringify(result, null, 2))
-
     // Format the content for display with better structure
     const formattedContent = `
       <article class="prose lg:prose-xl mx-auto">
@@ -105,10 +92,18 @@ export async function POST(request: Request) {
     `
 
     return NextResponse.json({ html: formattedContent })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Scraping error:', error)
+    
+    if (error instanceof Error) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 500 }
+      )
+    }
+    
     return NextResponse.json(
-      { error: error.message || 'Failed to scrape the website' },
+      { error: 'An unexpected error occurred while scraping the website' },
       { status: 500 }
     )
   }

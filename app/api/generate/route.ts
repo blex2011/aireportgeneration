@@ -1,208 +1,144 @@
 import OpenAI from 'openai'
 import { NextResponse } from 'next/server'
+import { aiConfig } from '@/utils/ai-config'
 import FirecrawlApp from '@mendable/firecrawl-js'
 
-// Validate environment variables
-if (!process.env.OPENAI_API_KEY) {
-  throw new Error('OPENAI_API_KEY environment variable is not set')
-}
-
-if (!process.env.FIRECRAWL_API_KEY) {
-  throw new Error('FIRECRAWL_API_KEY environment variable is not set')
-}
-
+// Initialize OpenAI client
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 })
 
+// Initialize Firecrawl client
 const firecrawl = new FirecrawlApp({
-  apiKey: process.env.FIRECRAWL_API_KEY
+  apiKey: process.env.FIRECRAWL_API_KEY,
 })
 
-// Configuration constants
-const MAX_PAGES = 1
-const POLL_INTERVAL = 2000 // 2 seconds
-const MAX_POLL_ATTEMPTS = 10
-
-interface FirecrawlMetadata {
-  title: string;
-  description: string;
-  language?: string;
-  sourceURL?: string;
-}
-
-interface CrawlResponse {
-  success: boolean;
-  error?: string;
-  id?: string;
-}
-
-interface StatusResponse {
-  status: 'scraping' | 'completed' | 'failed';
-  error?: string;
-  data?: Array<{
-    markdown: string;
-    metadata: FirecrawlMetadata;
-  }>;
-}
-
-async function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-function normalizeUrl(url: string): string {
-  try {
-    url = url.trim().replace(',', '.')
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = 'https://' + url
-    }
-    return new URL(url).toString()
-  } catch (error) {
-    throw new Error('Please enter a valid URL (e.g., https://example.com)')
-  }
+interface OpenAIError extends Error {
+  code?: string;
+  param?: string;
+  type?: string;
+  status?: number;
 }
 
 async function generateReportWithOpenAI(url: string, content: string, instructions: string) {
+  const model = aiConfig.models[aiConfig.defaultModel]
+  
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4",
+      model: model.name,
       messages: [
         {
           role: "system",
-          content: `You are a professional consultant who generates detailed HTML reports.
-
-Always follow the INSTRUCTIONS provided by the user and structure your response as valid HTML with:
-- Semantic HTML5 elements (article, section, header, etc.)
-- Proper heading hierarchy (h1, h2, h3)
-- Lists (ul, ol) for findings and recommendations
-- Paragraphs for detailed analysis
-- Tables where appropriate for structured data
-Do not include <!DOCTYPE>, <html>, <head>, or <body> tags.`
+          content: "You are a professional consultant who analyzes websites and generates detailed reports. Your reports should be well-structured, using appropriate HTML tags for formatting."
         },
         {
           role: "user",
-          content: `Please analyze the following website content and generate a detailed consultant report.
-
-URL: 
-${url}
-
-WEBSITE CONTENT:
-${content}
-
-INSTRUCTIONS:
-${instructions || 'Provide a comprehensive analysis of the website content.'}
-
-Generate a report that includes:
-1. Executive Summary
-2. Key Findings
-3. Detailed Analysis
-4. Recommendations
-5. Conclusion
-
-Format the response as clean, semantic HTML that can be directly inserted into a webpage.`
+          content: `Please analyze this website (${url}) and generate a detailed consultant report. Here's the content to analyze:\n\n${content}\n\nAdditional instructions: ${instructions}`
         }
       ],
-      temperature: 0.7, // Add some creativity while keeping professional tone
-      max_tokens: 2000  // Allow for longer, detailed reports
+      max_tokens: model.completionTokens,
     })
 
-    const html = completion.choices[0].message.content
-    
-    // Ensure we got HTML content
-    if (!html?.includes('<')) {
-      throw new Error('OpenAI did not return HTML content')
+    const report = completion.choices[0]?.message?.content
+    if (!report) {
+      throw new Error('No report content generated')
     }
 
-    return html
-  } catch (error: any) {
-    console.error('OpenAI error:', error)
-    if (error?.response?.status === 429) {
-      throw new Error('OpenAI rate limit exceeded. Please try again in a few minutes.')
+    return report
+  } catch (error) {
+    const openAIError = error as OpenAIError
+    
+    if (openAIError.code === 'context_length_exceeded') {
+      throw new Error(
+        'The content is too long for analysis. Please try with a smaller section of the website.'
+      )
     }
-    throw new Error('Failed to generate report with AI. Please try again.')
+    
+    if (openAIError.code === 'rate_limit_exceeded') {
+      throw new Error(
+        'OpenAI rate limit exceeded. Please try again in a few minutes.'
+      )
+    }
+
+    if (openAIError.status === 429) {
+      throw new Error(
+        'Too many requests. Please try again in a few minutes.'
+      )
+    }
+
+    if (openAIError.status === 400) {
+      throw new Error(
+        'Invalid request to AI service. Please try with different content.'
+      )
+    }
+
+    throw new Error(
+      'Failed to generate report. Please try again.'
+    )
   }
 }
 
 export async function POST(request: Request) {
-  console.log('Received POST request to /api/generate')
-  
   try {
-    const { url: rawUrl, instructions, mockContent } = await request.json()
-    console.log('Request payload:', { rawUrl, instructions, isTestMode: !!mockContent })
+    const { url, instructions, mockContent } = await request.json()
 
-    if (!rawUrl) {
-      return NextResponse.json({ error: 'Please enter a URL' }, { status: 400 })
+    if (!url) {
+      return NextResponse.json(
+        { error: 'URL is required' },
+        { status: 400 }
+      )
     }
 
-    const url = normalizeUrl(rawUrl)
-    
-    // If mockContent is provided, skip Firecrawl and use it directly
-    if (mockContent) {
-      console.log('Test mode: Using mock content')
-      const html = await generateReportWithOpenAI(url, mockContent, instructions)
-      return NextResponse.json({ html })
+    let content = mockContent
+    if (!content) {
+      try {
+        const response = await firecrawl.crawlUrl(url, {
+          limit: 1,
+        })
+        
+        if (!response.success || !response.data?.[0]?.markdown) {
+          throw new Error('Failed to crawl website')
+        }
+        
+        content = response.data[0].markdown
+      } catch (crawlError) {
+        if (crawlError instanceof Error && 
+            (crawlError.message.includes('402') || crawlError.message.includes('Insufficient credits'))) {
+          return NextResponse.json(
+            { error: 'Insufficient credits' },
+            { 
+              status: 402,
+              statusText: JSON.stringify({
+                message: 'Unable to crawl website due to insufficient credits.',
+                action: 'Please upgrade your plan at https://firecrawl.dev/pricing or try reducing the request limit.',
+                link: 'https://firecrawl.dev/pricing'
+              })
+            }
+          )
+        }
+        throw crawlError
+      }
     }
 
-    // Normal flow with Firecrawl
-    console.log(`Starting crawl (limited to ${MAX_PAGES} pages)...`)
     try {
-      const crawlResponse = await firecrawl.crawlUrl(url, {
-        limit: MAX_PAGES
-      }) as CrawlResponse
-
-      if (!crawlResponse.success || !crawlResponse.id) {
-        throw new Error(crawlResponse.error || 'Failed to start website crawl')
-      }
-
-      console.log('Crawl started, polling for results...')
-      let attempts = 0
-
-      while (attempts < MAX_POLL_ATTEMPTS) {
-        console.log(`Polling attempt ${attempts + 1}/${MAX_POLL_ATTEMPTS}...`)
-        const statusResponse = await firecrawl.checkCrawlStatus(crawlResponse.id) as StatusResponse
-
-        if (statusResponse.status === 'completed' && statusResponse.data?.[0]) {
-          const { markdown } = statusResponse.data[0]
-          console.log('Crawl completed, generating report...')
-          
-          const html = await generateReportWithOpenAI(url, markdown, instructions)
-          return NextResponse.json({ html })
-        }
-
-        if (statusResponse.status === 'failed') {
-          throw new Error(`Website crawl failed: ${statusResponse.error}`)
-        }
-
-        await delay(POLL_INTERVAL)
-        attempts++
-      }
-
-      throw new Error('Website crawl timed out. Please try again.')
-
-    } catch (error: any) {
-      console.error('Firecrawl error:', error)
-      if (error?.response?.status === 402 || error?.message?.includes('Insufficient credits')) {
+      const report = await generateReportWithOpenAI(url, content, instructions)
+      return NextResponse.json({ html: report })
+    } catch (aiError) {
+      if (aiError instanceof Error) {
         return NextResponse.json(
-          { error: 'Insufficient credits' },
-          { 
-            status: 402,
-            statusText: JSON.stringify({
-              message: 'Unable to crawl website due to insufficient credits.',
-              action: 'Please upgrade your plan at https://firecrawl.dev/pricing or try reducing the request limit.',
-              link: 'https://firecrawl.dev/pricing'
-            })
-          }
+          { error: aiError.message },
+          { status: aiError.message.includes('rate limit') ? 429 : 400 }
         )
       }
-      throw error
+      throw aiError
     }
 
-  } catch (error: any) {
-    console.error('API error:', error)
-    
-    const status = error?.response?.status || error?.statusCode || 500
-    const message = error?.message || 'An unexpected error occurred'
-    
-    return NextResponse.json({ error: message }, { status })
+  } catch (error: unknown) {
+    console.error('Error generating report:', error)
+    const errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred'
+    return NextResponse.json(
+      { error: errorMessage },
+      { status: 500 }
+    )
   }
 }
